@@ -25,6 +25,13 @@ class Lead(Base):
     sale_value = Column(Float, default=0.0)
     created_at = Column(DateTime(timezone=True), default=_now)
     last_contact = Column(DateTime(timezone=True), nullable=True)
+    goal = Column(String, default="")
+    package = Column(String, default="")
+    weight = Column(String, default="")
+    body_fat = Column(String, default="")
+    measurements = Column(String, default="")
+    next_follow_up = Column(String, default="")
+    assigned_to = Column(String, default="")
     history = Column(JSON, default=list)
 
     def to_dict(self):
@@ -43,6 +50,13 @@ class Lead(Base):
             "saleValue": self.sale_value or 0,
             "createdAt": (self.created_at or _now()).isoformat(),
             "lastContact": self.last_contact.isoformat() if self.last_contact else None,
+            "goal": self.goal or "",
+            "package": self.package or "",
+            "weight": self.weight or "",
+            "bodyFat": self.body_fat or "",
+            "measurements": self.measurements or "",
+            "nextFollowUp": self.next_follow_up or "",
+            "assignedTo": self.assigned_to or "",
             "history": self.history or [],
         }
 
@@ -55,6 +69,23 @@ class Event(Base):
 
     def to_dict(self):
         return {"type": self.type, "at": (self.at or _now()).isoformat(), "amount": self.amount or 0}
+
+class User(Base):
+    __tablename__ = "users"
+    id = Column(String, primary_key=True, default=_uuid)
+    username = Column(String, unique=True, index=True)
+    name = Column(String, default="")
+    password_hash = Column(String, default="")
+    is_admin = Column(Integer, default=0)
+    created_at = Column(DateTime(timezone=True), default=_now)
+    def to_dict(self):
+        return {"id": self.id, "username": self.username, "name": self.name or self.username, "isAdmin": bool(self.is_admin)}
+
+class Session(Base):
+    __tablename__ = "sessions"
+    token = Column(String, primary_key=True)
+    user_id = Column(String, index=True)
+    created_at = Column(DateTime(timezone=True), default=_now)
 
 class Setting(Base):
     __tablename__ = "settings"

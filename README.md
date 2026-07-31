@@ -19,9 +19,9 @@ in this repo; you import your report *after* deploying, into your own private in
    the `Dockerfile`.
 3. **Database:** in the project, New → Database → PostgreSQL. On your **app service → Variables**,
    add `DATABASE_URL` = `${{Postgres.DATABASE_URL}}`.
-4. **Lock it:** add `APP_PASSWORD` = a password only you know.
+4. **Accounts:** the app has real logins now. The FIRST person to open it registers and becomes the admin. To let other trainers sign up, set a `REGISTER_CODE` variable and share that code with them; without it, only the first account can be created.
 5. **Domain:** app service → Settings → Networking → Generate Domain (enter port **8080**).
-   Open the URL, enter your password, then Import your report. Add to home screen for the icon.
+   Open the URL, create your account, then Import your report. Add to home screen for the icon.
 
 ## Pages
 - App: `your-url/`
@@ -43,4 +43,4 @@ Open http://localhost:8000
 
 ## Note on member data
 Ships empty on purpose. Only import your Crunch kickoff report into your own private,
-password-protected instance, and clear it with your club first — that data is Crunch's.
+account-protected instance, and clear it with your club first — that data is Crunch's.
