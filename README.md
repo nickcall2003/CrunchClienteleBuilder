@@ -1,54 +1,46 @@
 # TrainerCRM
 
-A private kickoff-outreach CRM for a Crunch Cordova personal trainer. FastAPI backend +
-single-page frontend (served by the same app) + Postgres on Railway. No member data lives
-in this repo — you import your report *after* deploying, into your own private instance.
+A private kickoff-outreach CRM for a Crunch Cordova personal trainer. FastAPI + Postgres,
+deployed on Railway. Both pages (the app and the public sign-up form) are inlined into the
+Python, so there are **no folders** — every file sits at the repo root. No member data lives
+in this repo; you import your report *after* deploying, into your own private instance.
 
-## What's inside
-- **Pipeline** – work your kickoff list, sorted by soonest to expire
-- **Stats** – funnel, 7-day activity, sales + your commission (by PT level)
-- **Grow** – referral leaderboard, Instagram/DM quick-add, leads-by-source
-- **Import** – paste your report; it maps name / phone / email / expiration / calendar-pending
-- **Text queue** – one-tap personal texts, prefilled with each first name
-- **Guides** – pricing cheat sheet (your real numbers), close sequence, content plan
-- **/intake** – a public sign-up page people fill out; submissions drop straight into Pipeline
-
-## Commission levels (built in)
-PT1 30% · PT2 35% · PT3 40% · Master PT 45% · Elite PT 50%.
-Set yours in the app: Stats tab → tap the level next to "Your commission."
+## Files (all at root, no folders)
+- `main.py` – the API + serves both pages
+- `pages.py` – the two web pages (app UI + intake form) as inlined HTML
+- `models.py`, `database.py` – data layer (Postgres, SQLite fallback)
+- `run.py` – start script (reads the PORT Railway gives it)
+- `Dockerfile`, `railway.json`, `requirements.txt`, `.gitignore`
 
 ## Deploy on Railway (from an iPhone, GitHub web UI)
-1. **Make the repo:** on github.com, create a new repo, then "Add file → Upload files" and
-   upload this whole folder (keep the `backend/` and `frontend/` folders intact). Commit.
-2. **Railway:** at railway.app → New Project → **Deploy from GitHub repo** → pick this repo.
-   Railway reads the `Dockerfile` automatically.
-3. **Add the database:** in the project, **New → Database → PostgreSQL**. Railway sets
-   `DATABASE_URL` for you — the app picks it up automatically (falls back to SQLite locally).
-4. **Lock it down (do this):** Project → Variables → add `APP_PASSWORD` = a password only you
-   know. The app will ask for it once and remember it on your phone. The `/intake` sign-up page
-   stays public so prospects can submit.
-5. **Open your app:** Railway gives you a URL. Open it, enter your password, then go to the
-   **Import** tab and paste your kickoff report. Add the URL to your home screen for an app icon.
+1. **Repo:** on github.com, create a new repo → **Add file → Upload files** → upload ALL the
+   files from this folder (they're all loose — no folders to worry about). Commit.
+2. **Railway:** railway.app → New Project → Deploy from GitHub repo → pick the repo. It reads
+   the `Dockerfile`.
+3. **Database:** in the project, New → Database → PostgreSQL. On your **app service → Variables**,
+   add `DATABASE_URL` = `${{Postgres.DATABASE_URL}}`.
+4. **Lock it:** add `APP_PASSWORD` = a password only you know.
+5. **Domain:** app service → Settings → Networking → Generate Domain (enter port **8080**).
+   Open the URL, enter your password, then Import your report. Add to home screen for the icon.
 
-## The sign-up form
-Your public form is at `your-url/intake`. Put that link in your Instagram bio or make a QR
-for the gym floor. Every submission appears in your Pipeline tagged "Web form," referral and all.
+## Pages
+- App: `your-url/`
+- Public sign-up: `your-url/intake` — put this in your Instagram bio or a QR for the gym floor.
 
-## Environment variables
-| Variable | Purpose | Set by |
-| --- | --- | --- |
-| `DATABASE_URL` | Postgres connection | Railway (automatic) |
-| `APP_PASSWORD` | Locks the app (recommended) | You |
-| `PORT` | Web port | Railway (automatic) |
+## Commission levels
+PT1 30% · PT2 35% · PT3 40% · Master 45% · Elite 50%. Set yours on the Stats tab.
+
+## Editing the pages later
+The app UI and intake form live in `pages.py` as `INDEX_HTML` and `INTAKE_HTML`. Edit that one
+file and redeploy — no folders, no separate uploads.
 
 ## Run locally
 ```
 pip install -r requirements.txt
-uvicorn backend.main:app --reload
+python run.py
 ```
 Open http://localhost:8000
 
-## A note on member data
-This repo ships empty on purpose. Only import your Crunch kickoff report into your own private,
-password-protected instance, and clear it with your club first — that data is Crunch's. Your own
-leads (web-form, referrals, DMs) are yours.
+## Note on member data
+Ships empty on purpose. Only import your Crunch kickoff report into your own private,
+password-protected instance, and clear it with your club first — that data is Crunch's.

@@ -3,11 +3,12 @@ from datetime import datetime, timezone
 from typing import Optional, List
 from fastapi import FastAPI, Depends, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from database import Base, engine, SessionLocal
+from pages import INDEX_HTML, INTAKE_HTML
 import models
 
 Base.metadata.create_all(bind=engine)
@@ -18,7 +19,6 @@ app.add_middleware(
     allow_headers=["*"], allow_credentials=False,
 )
 
-FRONTEND = os.path.join(os.path.dirname(__file__), "frontend")
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "").strip()
 
 def now():
@@ -228,14 +228,14 @@ def intake(body: IntakeIn, s: Session = Depends(db)):
     return {"ok": True}
 
 # ---------- serve frontend ----------
-@app.get("/")
+@app.get("/", response_class=HTMLResponse)
 def index():
-    return FileResponse(os.path.join(FRONTEND, "index.html"))
+    return HTMLResponse(INDEX_HTML)
 
-@app.get("/intake")
-@app.get("/intake.html")
+@app.get("/intake", response_class=HTMLResponse)
+@app.get("/intake.html", response_class=HTMLResponse)
 def intake_page():
-    return FileResponse(os.path.join(FRONTEND, "intake.html"))
+    return HTMLResponse(INTAKE_HTML)
 
 @app.get("/health")
 def health():
