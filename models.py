@@ -32,6 +32,7 @@ class Lead(Base):
     measurements = Column(String, default="")
     next_follow_up = Column(String, default="")
     assigned_to = Column(String, default="")
+    appointment = Column(String, default="")
     history = Column(JSON, default=list)
 
     def to_dict(self):
@@ -57,6 +58,7 @@ class Lead(Base):
             "measurements": self.measurements or "",
             "nextFollowUp": self.next_follow_up or "",
             "assignedTo": self.assigned_to or "",
+            "appointment": self.appointment or "",
             "history": self.history or [],
         }
 

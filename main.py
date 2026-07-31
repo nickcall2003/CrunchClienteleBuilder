@@ -1,7 +1,7 @@
 import os, hashlib, secrets
 from datetime import datetime, timezone
 from typing import Optional, List
-from fastapi import FastAPI, Depends, Header, HTTPException, Request
+from fastapi import FastAPI, Depends, Header, HTTPException, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
@@ -18,7 +18,7 @@ def ensure_columns():
     from sqlalchemy import inspect, text
     cols_needed = {
         "goal": "VARCHAR", "package": "VARCHAR", "weight": "VARCHAR",
-        "body_fat": "VARCHAR", "measurements": "VARCHAR", "next_follow_up": "VARCHAR", "assigned_to": "VARCHAR",
+        "body_fat": "VARCHAR", "measurements": "VARCHAR", "next_follow_up": "VARCHAR", "assigned_to": "VARCHAR", "appointment": "VARCHAR",
     }
     insp = inspect(engine)
     existing = {c["name"] for c in insp.get_columns("leads")}
@@ -102,6 +102,7 @@ class LeadIn(BaseModel):
 class StageIn(BaseModel):
     stage: str
     saleValue: Optional[float] = None
+    appointment: Optional[str] = None
 
 class NoteIn(BaseModel):
     text: str
@@ -115,6 +116,7 @@ class SaleIn(BaseModel):
     measurements: Optional[str] = None
     nextFollowUp: Optional[str] = None
     assignedTo: Optional[str] = None
+    appointment: Optional[str] = None
 
 class SettingsIn(BaseModel):
     goal: int
@@ -229,28 +231,7 @@ def create_lead(body: LeadIn, s: Session = Depends(db), user=Depends(require_use
 
 @app.post("/api/import")
 def bulk_import(body: List[LeadIn], s: Session = Depends(db), user=Depends(require_user)):
-    existing = s.query(models.Lead).all()
-    def dupe(d):
-        ph = "".join(ch for ch in (d.phone or "") if ch.isdigit())
-        em = (d.email or "").lower()
-        for l in existing:
-            lp = "".join(ch for ch in (l.phone or "") if ch.isdigit())
-            if ph and len(ph) >= 7 and lp == ph:
-                return True
-            if em and (l.email or "").lower() == em:
-                return True
-            if d.firstName and l.first_name.lower() == d.firstName.lower() and (l.last_name or "").lower() == (d.lastName or "").lower():
-                return True
-        return False
-    added = skipped = 0
-    for d in body:
-        if not (d.firstName or d.email or d.phone):
-            continue
-        if dupe(d):
-            skipped += 1; continue
-        lead = make_lead(s, d.model_dump())
-        existing.append(lead); added += 1
-    s.commit()
+    added, skipped = insert_leads(s, [d.model_dump() for d in body])
     return {"added": added, "skipped": skipped}
 
 @app.post("/api/leads/{lead_id}/stage")
@@ -264,6 +245,8 @@ def set_stage(lead_id: str, body: StageIn, s: Session = Depends(db), user=Depend
         lead.last_contact = now()
     if body.stage in ("reached", "replied"):
         lead.next_follow_up = ""
+    if body.appointment is not None:
+        lead.appointment = body.appointment
     if body.stage == "sold" and body.saleValue is not None:
         lead.sale_value = body.saleValue
     if body.stage != prev and body.stage in STAGE_EVENT:
@@ -308,6 +291,7 @@ def patch_lead(lead_id: str, body: SaleIn, s: Session = Depends(db), user=Depend
     if body.measurements is not None: lead.measurements = body.measurements
     if body.nextFollowUp is not None: lead.next_follow_up = body.nextFollowUp
     if body.assignedTo is not None: lead.assigned_to = body.assignedTo
+    if body.appointment is not None: lead.appointment = body.appointment
     s.commit(); s.refresh(lead)
     return lead.to_dict()
 
@@ -330,6 +314,125 @@ def put_settings(body: SettingsIn, s: Session = Depends(db), user=Depends(requir
 def reset(s: Session = Depends(db), user=Depends(require_user)):
     s.query(models.Lead).delete(); s.query(models.Event).delete(); s.commit()
     return {"ok": True}
+
+# ---------- file import (PDF / CSV / Excel) ----------
+import re as _re, io as _io
+
+def _norm_phone(raw):
+    d = _re.sub(r"[^0-9]", "", raw or "")
+    return f"({d[0:3]}) {d[3:6]}-{d[6:10]}" if len(d) == 10 else (raw or "")
+
+def parse_report_text(txt):
+    reEmail = _re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+    rePhone = _re.compile(r"\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}")
+    reDate = _re.compile(r"\d{2}/\d{2}/\d{4}")
+    reName = _re.compile(r"([A-Za-z'\-]+),\s?([A-Za-z'\-]+)")
+    rePend = _re.compile(r"KickOff\s*([01\-])", _re.I)
+    out = []
+    for line in (txt or "").split("\n"):
+        if "kickoff" not in line.lower() and not reEmail.search(line):
+            continue
+        em = reEmail.search(line); email = em.group(0) if em else ""
+        ph = rePhone.search(line); phone = _norm_phone(ph.group(0)) if ph else ""
+        if not email and not phone:
+            continue
+        nm = reName.search(line); first = last = ""
+        if nm: last, first = nm.group(1), nm.group(2)
+        if not first and email: first = email
+        dates = reDate.findall(line); expire = dates[1] if len(dates) >= 2 else ""
+        pm = rePend.search(line); pend = pm.group(1) if pm else ""
+        out.append({"firstName": first, "lastName": last, "phone": phone, "email": email,
+                    "pending": pend, "expire": expire, "source": "Kickoff report"})
+    return out
+
+def parse_rows(rows):
+    if not rows: return []
+    def maph(h):
+        s = (str(h) if h is not None else "").strip().lower()
+        if _re.search(r"first", s): return "first"
+        if _re.search(r"last|surname", s): return "last"
+        if _re.search(r"member.*name|full.*name|^name$|client", s): return "full"
+        if _re.search(r"phone|cell|mobile", s): return "phone"
+        if "email" in s: return "email"
+        if _re.search(r"source|origin", s): return "source"
+        if "expir" in s: return "expire"
+        return None
+    header = [maph(x) for x in rows[0]]
+    has = any(header)
+    data = rows[1:] if has else rows
+    mapping = header if has else ["first", "last", "phone", "email"]
+    out = []
+    for r in data:
+        rec = {"first": "", "last": "", "phone": "", "email": "", "source": "Imported", "expire": ""}
+        for i, val in enumerate(r):
+            f = mapping[i] if i < len(mapping) else None
+            if not f: continue
+            v = str(val).strip() if val is not None else ""
+            if f == "full":
+                if "," in v:
+                    a, b = v.split(",", 1); rec["last"], rec["first"] = a.strip(), b.strip()
+                else:
+                    parts = v.split()
+                    if parts: rec["first"], rec["last"] = parts[0], " ".join(parts[1:])
+            elif f in rec:
+                rec[f] = v
+        if not rec["first"] and not rec["email"] and not rec["phone"]:
+            continue
+        out.append({"firstName": rec["first"], "lastName": rec["last"], "phone": rec["phone"],
+                    "email": rec["email"], "source": rec["source"] or "Imported", "expire": rec["expire"]})
+    return out
+
+def insert_leads(s, items):
+    existing = s.query(models.Lead).all()
+    def dupe(d):
+        ph = "".join(ch for ch in (d.get("phone") or "") if ch.isdigit())
+        em = (d.get("email") or "").lower()
+        fn = (d.get("firstName") or "").lower()
+        ln = (d.get("lastName") or "").lower()
+        for l in existing:
+            lp = "".join(ch for ch in (l.phone or "") if ch.isdigit())
+            if ph and len(ph) >= 7 and lp == ph: return True
+            if em and (l.email or "").lower() == em: return True
+            if fn and l.first_name.lower() == fn and (l.last_name or "").lower() == ln: return True
+        return False
+    added = skipped = 0
+    for d in items:
+        if not (d.get("firstName") or d.get("email") or d.get("phone")): continue
+        if dupe(d): skipped += 1; continue
+        lead = make_lead(s, d); existing.append(lead); added += 1
+    s.commit()
+    return added, skipped
+
+@app.post("/api/import-file")
+async def import_file(file: UploadFile = File(...), s: Session = Depends(db), user=Depends(require_user)):
+    fname = (file.filename or "").lower()
+    content = await file.read()
+    leads = []
+    try:
+        if fname.endswith(".pdf"):
+            import pdfplumber
+            text = ""
+            with pdfplumber.open(_io.BytesIO(content)) as pdf:
+                for pg in pdf.pages:
+                    text += (pg.extract_text() or "") + "\n"
+            leads = parse_report_text(text)
+        elif fname.endswith(".csv"):
+            import csv
+            rows = list(csv.reader(_io.StringIO(content.decode("utf-8", "ignore"))))
+            leads = parse_rows(rows)
+        elif fname.endswith(".xlsx") or fname.endswith(".xls"):
+            import openpyxl
+            wb = openpyxl.load_workbook(_io.BytesIO(content), read_only=True, data_only=True)
+            rows = [list(r) for r in wb.active.iter_rows(values_only=True)]
+            leads = parse_rows(rows)
+        else:
+            raise HTTPException(400, "Unsupported file type. Use PDF, CSV, or Excel.")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(422, "Could not read that file. Try CSV, or paste the text instead.")
+    added, skipped = insert_leads(s, leads)
+    return {"added": added, "skipped": skipped, "parsed": len(leads)}
 
 # ---------- public intake (no key required) ----------
 @app.post("/api/intake", status_code=201)
