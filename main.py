@@ -85,6 +85,14 @@ def require_user(authorization: Optional[str] = Header(None), s: Session = Depen
         raise HTTPException(status_code=401, detail="no user")
     return user
 
+def check_access(lead, user):
+    """Non-admins may only touch their own leads or unassigned ones."""
+    if user.is_admin:
+        return
+    a = (lead.assigned_to or "").strip()
+    if a and a != user.name:
+        raise HTTPException(status_code=403, detail="This lead belongs to another trainer")
+
 # ---------- request bodies ----------
 class LeadIn(BaseModel):
     firstName: str = ""
@@ -214,7 +222,10 @@ def me(user=Depends(require_user)):
 # ---------- state ----------
 @app.get("/api/state")
 def get_state(s: Session = Depends(db), user=Depends(require_user)):
-    leads = [l.to_dict() for l in s.query(models.Lead).all()]
+    lq = s.query(models.Lead)
+    if not user.is_admin:
+        lq = lq.filter((models.Lead.assigned_to == user.name) | (models.Lead.assigned_to == "") | (models.Lead.assigned_to == None))
+    leads = [l.to_dict() for l in lq.all()]
     events = [e.to_dict() for e in s.query(models.Event).all()]
     st = {row.key: row.value for row in s.query(models.Setting).all()}
     return {"leads": leads, "events": events,
@@ -239,6 +250,7 @@ def set_stage(lead_id: str, body: StageIn, s: Session = Depends(db), user=Depend
     lead = s.get(models.Lead, lead_id)
     if not lead:
         raise HTTPException(404)
+    check_access(lead, user)
     prev = lead.stage
     lead.stage = body.stage
     if body.stage in TOUCH:
@@ -263,6 +275,7 @@ def set_stage(lead_id: str, body: StageIn, s: Session = Depends(db), user=Depend
 def log_contact(lead_id: str, s: Session = Depends(db), user=Depends(require_user)):
     lead = s.get(models.Lead, lead_id)
     if not lead: raise HTTPException(404)
+    check_access(lead, user)
     lead.last_contact = now()
     lead.next_follow_up = ""
     hist = list(lead.history or []); hist.insert(0, {"at": now().isoformat(), "text": "Logged a contact"})
@@ -274,6 +287,7 @@ def log_contact(lead_id: str, s: Session = Depends(db), user=Depends(require_use
 def add_note(lead_id: str, body: NoteIn, s: Session = Depends(db), user=Depends(require_user)):
     lead = s.get(models.Lead, lead_id)
     if not lead: raise HTTPException(404)
+    check_access(lead, user)
     if body.text.strip():
         hist = list(lead.history or []); hist.insert(0, {"at": now().isoformat(), "text": body.text.strip()})
         lead.history = hist; s.commit(); s.refresh(lead)
@@ -283,6 +297,7 @@ def add_note(lead_id: str, body: NoteIn, s: Session = Depends(db), user=Depends(
 def patch_lead(lead_id: str, body: SaleIn, s: Session = Depends(db), user=Depends(require_user)):
     lead = s.get(models.Lead, lead_id)
     if not lead: raise HTTPException(404)
+    check_access(lead, user)
     if body.saleValue is not None: lead.sale_value = body.saleValue
     if body.goal is not None: lead.goal = body.goal
     if body.package is not None: lead.package = body.package
@@ -298,7 +313,9 @@ def patch_lead(lead_id: str, body: SaleIn, s: Session = Depends(db), user=Depend
 @app.delete("/api/leads/{lead_id}", status_code=204)
 def delete_lead(lead_id: str, s: Session = Depends(db), user=Depends(require_user)):
     lead = s.get(models.Lead, lead_id)
-    if lead: s.delete(lead); s.commit()
+    if lead:
+        check_access(lead, user)
+        s.delete(lead); s.commit()
     return JSONResponse(status_code=204, content=None)
 
 @app.put("/api/settings")
