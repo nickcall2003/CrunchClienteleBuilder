@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from database import Base, engine, SessionLocal
 from pages import INDEX_HTML, INTAKE_HTML
 
-APP_VERSION = "Aug4-4"
+APP_VERSION = "Aug4-5"
 import models
 
 Base.metadata.create_all(bind=engine)
@@ -307,7 +307,7 @@ def schedule(date: str, s: Session = Depends(db), user=Depends(require_user)):
             if (l.assigned_to or "") == t.name and (l.appointment or "")[:10] == date and l.stage in ("scheduled", "showed"):
                 mine = (t.id == user.id or user.is_admin)
                 nm = (l.first_name + " " + ((l.last_name or "")[:1] + "." if l.last_name else "")).strip() if mine else "Booked"
-                appts.append({"time": l.appointment[11:16], "label": nm, "type": l.lead_type or "kickoff"})
+                appts.append({"time": l.appointment[11:16], "label": nm, "type": l.lead_type or "kickoff", "leadId": (l.id if mine else "")})
         appts.sort(key=lambda a: a["time"])
         out.append({"id": t.id, "name": t.name, "isAdmin": bool(t.is_admin), "avail": av, "appts": appts})
     return {"date": date, "weekday": wk, "trainers": out}
