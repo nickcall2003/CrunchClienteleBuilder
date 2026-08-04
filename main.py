@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from database import Base, engine, SessionLocal
 from pages import INDEX_HTML, INTAKE_HTML
 
-APP_VERSION = "Aug4-5"
+APP_VERSION = "Aug4-6"
 import models
 
 Base.metadata.create_all(bind=engine)
@@ -79,6 +79,32 @@ def verify_pw(pw: str, stored: str) -> bool:
         return secrets.compare_digest(calc, h)
     except Exception:
         return False
+
+def bootstrap_admin():
+    """Recovery hatch: if ADMIN_USERNAME + ADMIN_PASSWORD env vars are set, create or
+    reset that user as an admin on startup. Lets a locked-out admin get back in from
+    Railway env vars without touching the database directly."""
+    u = os.environ.get("ADMIN_USERNAME", "").strip().lower()
+    p = os.environ.get("ADMIN_PASSWORD", "").strip()
+    if not u or not p:
+        return
+    s = SessionLocal()
+    try:
+        user = s.query(models.User).filter(models.User.username == u).first()
+        if user:
+            user.password_hash = hash_pw(p)
+            user.is_admin = 1
+        else:
+            name = os.environ.get("ADMIN_NAME", "").strip() or u
+            user = models.User(username=u, name=name, password_hash=hash_pw(p), is_admin=1)
+            s.add(user)
+        s.commit()
+    except Exception:
+        s.rollback()
+    finally:
+        s.close()
+
+bootstrap_admin()
 
 def seed_settings():
     s = SessionLocal()
