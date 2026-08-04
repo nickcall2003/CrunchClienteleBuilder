@@ -33,6 +33,7 @@ class Lead(Base):
     next_follow_up = Column(String, default="")
     assigned_to = Column(String, default="")
     appointment = Column(String, default="")
+    lead_type = Column(String, default="kickoff")
     history = Column(JSON, default=list)
 
     def to_dict(self):
@@ -59,6 +60,7 @@ class Lead(Base):
             "nextFollowUp": self.next_follow_up or "",
             "assignedTo": self.assigned_to or "",
             "appointment": self.appointment or "",
+            "type": self.lead_type or "kickoff",
             "history": self.history or [],
         }
 
@@ -68,6 +70,7 @@ class Event(Base):
     type = Column(String)
     at = Column(DateTime(timezone=True), default=_now)
     amount = Column(Float, default=0.0)
+    user_id = Column(String, default="", index=True)
 
     def to_dict(self):
         return {"type": self.type, "at": (self.at or _now()).isoformat(), "amount": self.amount or 0}

@@ -18,7 +18,7 @@ def ensure_columns():
     from sqlalchemy import inspect, text
     cols_needed = {
         "goal": "VARCHAR", "package": "VARCHAR", "weight": "VARCHAR",
-        "body_fat": "VARCHAR", "measurements": "VARCHAR", "next_follow_up": "VARCHAR", "assigned_to": "VARCHAR", "appointment": "VARCHAR",
+        "body_fat": "VARCHAR", "measurements": "VARCHAR", "next_follow_up": "VARCHAR", "assigned_to": "VARCHAR", "appointment": "VARCHAR", "lead_type": "VARCHAR",
     }
     insp = inspect(engine)
     existing = {c["name"] for c in insp.get_columns("leads")}
@@ -26,6 +26,18 @@ def ensure_columns():
         for name, coltype in cols_needed.items():
             if name not in existing:
                 conn.execute(text(f'ALTER TABLE leads ADD COLUMN {name} {coltype} DEFAULT \'\''))
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("UPDATE leads SET lead_type='kickoff' WHERE lead_type IS NULL OR lead_type=''"))
+    except Exception:
+        pass
+    try:
+        ecols = {c["name"] for c in insp.get_columns("events")}
+        if "user_id" not in ecols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE events ADD COLUMN user_id VARCHAR DEFAULT ''"))
+    except Exception:
+        pass
 ensure_columns()
 
 app = FastAPI(title="TrainerCRM API")
@@ -85,6 +97,11 @@ def require_user(authorization: Optional[str] = Header(None), s: Session = Depen
         raise HTTPException(status_code=401, detail="no user")
     return user
 
+def require_admin(user=Depends(require_user)):
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin only")
+    return user
+
 def check_access(lead, user):
     """Non-admins may only touch their own leads or unassigned ones."""
     if user.is_admin:
@@ -105,6 +122,7 @@ class LeadIn(BaseModel):
     pending: str = ""
     expire: str = ""
     assignedTo: str = ""
+    type: str = "kickoff"
     note: str = ""
 
 class StageIn(BaseModel):
@@ -125,6 +143,7 @@ class SaleIn(BaseModel):
     nextFollowUp: Optional[str] = None
     assignedTo: Optional[str] = None
     appointment: Optional[str] = None
+    type: Optional[str] = None
 
 class SettingsIn(BaseModel):
     goal: int
@@ -167,6 +186,7 @@ def make_lead(s: Session, d: dict) -> models.Lead:
         expire=d.get("expire") or "",
         goal=d.get("goal") or "",
         assigned_to=d.get("assignedTo") or "",
+        lead_type=d.get("type") or "kickoff",
         stage="new", sale_value=0.0, created_at=now(), history=hist,
     )
     s.add(lead)
@@ -219,6 +239,45 @@ def logout(authorization: Optional[str] = Header(None), s: Session = Depends(db)
 def me(user=Depends(require_user)):
     return user.to_dict()
 
+@app.get("/api/trainers")
+def trainers(s: Session = Depends(db), user=Depends(require_user)):
+    return [{"id": u.id, "name": u.name, "isAdmin": bool(u.is_admin)} for u in s.query(models.User).all()]
+
+class PasswordIn(BaseModel):
+    password: str
+
+@app.post("/api/users/{uid}/password")
+def admin_reset_password(uid: str, body: PasswordIn, s: Session = Depends(db), admin=Depends(require_admin)):
+    u = s.get(models.User, uid)
+    if not u: raise HTTPException(404)
+    if not body.password or len(body.password) < 4:
+        raise HTTPException(400, "Password must be at least 4 characters")
+    u.password_hash = hash_pw(body.password)
+    s.query(models.Session).filter(models.Session.user_id == uid).delete()  # force re-login
+    s.commit()
+    return {"ok": True}
+
+@app.post("/api/users/{uid}/admin")
+def admin_toggle(uid: str, s: Session = Depends(db), admin=Depends(require_admin)):
+    u = s.get(models.User, uid)
+    if not u: raise HTTPException(404)
+    u.is_admin = 0 if u.is_admin else 1
+    s.commit()
+    return {"ok": True, "isAdmin": bool(u.is_admin)}
+
+@app.delete("/api/users/{uid}")
+def admin_delete_user(uid: str, s: Session = Depends(db), admin=Depends(require_admin)):
+    if uid == admin.id:
+        raise HTTPException(400, "You can't remove your own account")
+    u = s.get(models.User, uid)
+    if not u: raise HTTPException(404)
+    # return their leads to the shared pool so nothing is orphaned
+    for l in s.query(models.Lead).filter(models.Lead.assigned_to == u.name).all():
+        l.assigned_to = ""
+    s.query(models.Session).filter(models.Session.user_id == uid).delete()
+    s.delete(u); s.commit()
+    return {"ok": True}
+
 # ---------- state ----------
 @app.get("/api/state")
 def get_state(s: Session = Depends(db), user=Depends(require_user)):
@@ -226,7 +285,7 @@ def get_state(s: Session = Depends(db), user=Depends(require_user)):
     if not user.is_admin:
         lq = lq.filter((models.Lead.assigned_to == user.name) | (models.Lead.assigned_to == "") | (models.Lead.assigned_to == None))
     leads = [l.to_dict() for l in lq.all()]
-    events = [e.to_dict() for e in s.query(models.Event).all()]
+    events = [e.to_dict() for e in s.query(models.Event).filter(models.Event.user_id == user.id).all()]
     st = {row.key: row.value for row in s.query(models.Setting).all()}
     return {"leads": leads, "events": events,
             "settings": {"goal": int(st.get("goal", "30")), "level": st.get("level", "PT3")}}
@@ -263,7 +322,7 @@ def set_stage(lead_id: str, body: StageIn, s: Session = Depends(db), user=Depend
         lead.sale_value = body.saleValue
     if body.stage != prev and body.stage in STAGE_EVENT:
         amt = body.saleValue if (body.stage == "sold" and body.saleValue is not None) else 0
-        s.add(models.Event(type=STAGE_EVENT[body.stage], at=now(), amount=amt or 0))
+        s.add(models.Event(type=STAGE_EVENT[body.stage], at=now(), amount=amt or 0, user_id=user.id))
     hist = list(lead.history or [])
     label = {"new":"Not Contacted","reached":"Texted","replied":"Replied","scheduled":"Scheduled","showed":"Showed / Kickoff","sold":"Sold PT","noresp":"No Response","dead":"Not Interested"}.get(body.stage, body.stage)
     hist.insert(0, {"at": now().isoformat(), "text": "\u2192 " + label})
@@ -307,6 +366,7 @@ def patch_lead(lead_id: str, body: SaleIn, s: Session = Depends(db), user=Depend
     if body.nextFollowUp is not None: lead.next_follow_up = body.nextFollowUp
     if body.assignedTo is not None: lead.assigned_to = body.assignedTo
     if body.appointment is not None: lead.appointment = body.appointment
+    if body.type is not None: lead.lead_type = body.type
     s.commit(); s.refresh(lead)
     return lead.to_dict()
 
