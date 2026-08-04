@@ -1,4 +1,4 @@
-import os, hashlib, secrets
+import os, hashlib, secrets, json
 from datetime import datetime, timezone
 from typing import Optional, List
 from fastapi import FastAPI, Depends, Header, HTTPException, Request, UploadFile, File, Form
@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from database import Base, engine, SessionLocal
 from pages import INDEX_HTML, INTAKE_HTML
 
-APP_VERSION = "Aug4-2"
+APP_VERSION = "Aug4-4"
 import models
 
 Base.metadata.create_all(bind=engine)
@@ -31,6 +31,13 @@ def ensure_columns():
     try:
         with engine.begin() as conn:
             conn.execute(text("UPDATE leads SET lead_type='kickoff' WHERE lead_type IS NULL OR lead_type=''"))
+    except Exception:
+        pass
+    try:
+        ucols = {c["name"] for c in insp.get_columns("users")}
+        if "availability" not in ucols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE users ADD COLUMN availability VARCHAR DEFAULT ''"))
     except Exception:
         pass
     try:
@@ -254,6 +261,56 @@ def gym_stats(s: Session = Depends(db), user=Depends(require_user)):
 @app.get("/api/trainers")
 def trainers(s: Session = Depends(db), user=Depends(require_user)):
     return [{"id": u.id, "name": u.name, "isAdmin": bool(u.is_admin)} for u in s.query(models.User).all()]
+
+_DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+DEFAULT_AVAIL = {d: {"on": d != "sun", "start": "06:00", "end": "20:00"} for d in _DAYS}
+
+def get_avail(u):
+    try:
+        a = json.loads(u.availability) if u.availability else {}
+    except Exception:
+        a = {}
+    return {d: a.get(d, DEFAULT_AVAIL[d]) for d in _DAYS}
+
+class AvailIn(BaseModel):
+    availability: dict
+
+@app.get("/api/availability")
+def get_availability(user=Depends(require_user)):
+    return {"availability": get_avail(user)}
+
+@app.put("/api/availability")
+def put_availability(body: AvailIn, s: Session = Depends(db), user=Depends(require_user)):
+    clean = {}
+    for d in _DAYS:
+        v = (body.availability or {}).get(d, DEFAULT_AVAIL[d])
+        clean[d] = {"on": bool(v.get("on", True)), "start": str(v.get("start", "06:00")), "end": str(v.get("end", "20:00"))}
+    user.availability = json.dumps(clean)
+    s.commit()
+    return {"availability": clean}
+
+@app.get("/api/schedule")
+def schedule(date: str, s: Session = Depends(db), user=Depends(require_user)):
+    # date = YYYY-MM-DD
+    try:
+        import datetime as _dt
+        wk = _DAYS[_dt.date.fromisoformat(date).weekday()]
+    except Exception:
+        raise HTTPException(400, "bad date")
+    trainers = s.query(models.User).all()
+    all_leads = s.query(models.Lead).all()
+    out = []
+    for t in trainers:
+        av = get_avail(t)[wk]
+        appts = []
+        for l in all_leads:
+            if (l.assigned_to or "") == t.name and (l.appointment or "")[:10] == date and l.stage in ("scheduled", "showed"):
+                mine = (t.id == user.id or user.is_admin)
+                nm = (l.first_name + " " + ((l.last_name or "")[:1] + "." if l.last_name else "")).strip() if mine else "Booked"
+                appts.append({"time": l.appointment[11:16], "label": nm, "type": l.lead_type or "kickoff"})
+        appts.sort(key=lambda a: a["time"])
+        out.append({"id": t.id, "name": t.name, "isAdmin": bool(t.is_admin), "avail": av, "appts": appts})
+    return {"date": date, "weekday": wk, "trainers": out}
 
 class PasswordIn(BaseModel):
     password: str

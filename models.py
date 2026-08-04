@@ -82,6 +82,7 @@ class User(Base):
     name = Column(String, default="")
     password_hash = Column(String, default="")
     is_admin = Column(Integer, default=0)
+    availability = Column(String, default="")
     created_at = Column(DateTime(timezone=True), default=_now)
     def to_dict(self):
         return {"id": self.id, "username": self.username, "name": self.name or self.username, "isAdmin": bool(self.is_admin)}
