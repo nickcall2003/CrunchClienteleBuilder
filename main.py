@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 
 from database import Base, engine, SessionLocal
 from pages import INDEX_HTML, INTAKE_HTML
+
+APP_VERSION = "Aug4-2"
 import models
 
 Base.metadata.create_all(bind=engine)
@@ -551,15 +553,17 @@ def intake(body: IntakeIn, s: Session = Depends(db)):
     return {"ok": True}
 
 # ---------- serve frontend ----------
+_NOCACHE = {"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0", "Pragma": "no-cache"}
+
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return HTMLResponse(INDEX_HTML)
+    return HTMLResponse(INDEX_HTML, headers=_NOCACHE)
 
 @app.get("/intake", response_class=HTMLResponse)
 @app.get("/intake.html", response_class=HTMLResponse)
 def intake_page():
-    return HTMLResponse(INTAKE_HTML)
+    return HTMLResponse(INTAKE_HTML, headers=_NOCACHE)
 
 @app.get("/health")
 def health():
-    return {"ok": True}
+    return {"ok": True, "version": APP_VERSION}
