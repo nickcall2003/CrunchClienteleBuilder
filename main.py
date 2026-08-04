@@ -1,7 +1,7 @@
 import os, hashlib, secrets
 from datetime import datetime, timezone
 from typing import Optional, List
-from fastapi import FastAPI, Depends, Header, HTTPException, Request, UploadFile, File
+from fastapi import FastAPI, Depends, Header, HTTPException, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
@@ -239,6 +239,16 @@ def logout(authorization: Optional[str] = Header(None), s: Session = Depends(db)
 def me(user=Depends(require_user)):
     return user.to_dict()
 
+@app.get("/api/gym-stats")
+def gym_stats(s: Session = Depends(db), user=Depends(require_user)):
+    leads = s.query(models.Lead).all()
+    texted = sum(1 for l in leads if l.stage in ("reached", "replied", "scheduled", "showed", "sold"))
+    replied = sum(1 for l in leads if l.stage in ("replied", "scheduled", "showed", "sold"))
+    sold = sum(1 for l in leads if l.stage == "sold")
+    return {"reply": round(replied / texted * 100) if texted else 0,
+            "close": round(sold / replied * 100) if replied else 0,
+            "texted": texted}
+
 @app.get("/api/trainers")
 def trainers(s: Session = Depends(db), user=Depends(require_user)):
     return [{"id": u.id, "name": u.name, "isAdmin": bool(u.is_admin)} for u in s.query(models.User).all()]
@@ -318,15 +328,17 @@ def set_stage(lead_id: str, body: StageIn, s: Session = Depends(db), user=Depend
         lead.next_follow_up = ""
     if body.appointment is not None:
         lead.appointment = body.appointment
+    _labels = {"reached":"Texted","replied":"They replied","scheduled":"Booked appointment","showed":"Showed up","sold":"Sold PT","dead":"Marked not interested","noresp":"No response","new":"Reset to New"}
+    _txt = _labels.get(body.stage, "Stage updated")
+    if body.stage == "sold" and body.saleValue:
+        _txt = "Sold PT ($" + str(int(body.saleValue)) + ")"
+    _h = list(lead.history or []); _h.insert(0, {"at": now().isoformat(), "text": _txt, "by": user.name})
+    lead.history = _h
     if body.stage == "sold" and body.saleValue is not None:
         lead.sale_value = body.saleValue
     if body.stage != prev and body.stage in STAGE_EVENT:
         amt = body.saleValue if (body.stage == "sold" and body.saleValue is not None) else 0
         s.add(models.Event(type=STAGE_EVENT[body.stage], at=now(), amount=amt or 0, user_id=user.id))
-    hist = list(lead.history or [])
-    label = {"new":"Not Contacted","reached":"Texted","replied":"Replied","scheduled":"Scheduled","showed":"Showed / Kickoff","sold":"Sold PT","noresp":"No Response","dead":"Not Interested"}.get(body.stage, body.stage)
-    hist.insert(0, {"at": now().isoformat(), "text": "\u2192 " + label})
-    lead.history = hist
     s.commit(); s.refresh(lead)
     return lead.to_dict()
 
@@ -337,7 +349,7 @@ def log_contact(lead_id: str, s: Session = Depends(db), user=Depends(require_use
     check_access(lead, user)
     lead.last_contact = now()
     lead.next_follow_up = ""
-    hist = list(lead.history or []); hist.insert(0, {"at": now().isoformat(), "text": "Logged a contact"})
+    hist = list(lead.history or []); hist.insert(0, {"at": now().isoformat(), "text": "Logged a contact", "by": user.name})
     lead.history = hist
     s.commit(); s.refresh(lead)
     return lead.to_dict()
@@ -348,7 +360,7 @@ def add_note(lead_id: str, body: NoteIn, s: Session = Depends(db), user=Depends(
     if not lead: raise HTTPException(404)
     check_access(lead, user)
     if body.text.strip():
-        hist = list(lead.history or []); hist.insert(0, {"at": now().isoformat(), "text": body.text.strip()})
+        hist = list(lead.history or []); hist.insert(0, {"at": now().isoformat(), "text": body.text.strip(), "by": user.name})
         lead.history = hist; s.commit(); s.refresh(lead)
     return lead.to_dict()
 
@@ -407,8 +419,10 @@ def parse_report_text(txt):
     rePend = _re.compile(r"KickOff\s*([01\-])", _re.I)
     out = []
     for line in (txt or "").split("\n"):
-        if "kickoff" not in line.lower() and not reEmail.search(line):
+        low = line.lower()
+        if "kickoff" not in low and "sga" not in low and not reEmail.search(line):
             continue
+        ltype = "sga" if "sga" in low else "kickoff"
         em = reEmail.search(line); email = em.group(0) if em else ""
         ph = rePhone.search(line); phone = _norm_phone(ph.group(0)) if ph else ""
         if not email and not phone:
@@ -419,7 +433,8 @@ def parse_report_text(txt):
         dates = reDate.findall(line); expire = dates[1] if len(dates) >= 2 else ""
         pm = rePend.search(line); pend = pm.group(1) if pm else ""
         out.append({"firstName": first, "lastName": last, "phone": phone, "email": email,
-                    "pending": pend, "expire": expire, "source": "Kickoff report"})
+                    "pending": pend, "expire": expire, "type": ltype,
+                    "source": "SGA report" if ltype == "sga" else "Kickoff report"})
     return out
 
 def parse_rows(rows):
@@ -432,6 +447,7 @@ def parse_rows(rows):
         if _re.search(r"phone|cell|mobile", s): return "phone"
         if "email" in s: return "email"
         if _re.search(r"source|origin", s): return "source"
+        if _re.search(r"event|appointment type|appt type|^type$|kind", s): return "etype"
         if "expir" in s: return "expire"
         return None
     header = [maph(x) for x in rows[0]]
@@ -440,7 +456,7 @@ def parse_rows(rows):
     mapping = header if has else ["first", "last", "phone", "email"]
     out = []
     for r in data:
-        rec = {"first": "", "last": "", "phone": "", "email": "", "source": "Imported", "expire": ""}
+        rec = {"first": "", "last": "", "phone": "", "email": "", "source": "Imported", "expire": "", "etype": ""}
         for i, val in enumerate(r):
             f = mapping[i] if i < len(mapping) else None
             if not f: continue
@@ -455,8 +471,10 @@ def parse_rows(rows):
                 rec[f] = v
         if not rec["first"] and not rec["email"] and not rec["phone"]:
             continue
+        lt = "sga" if "sga" in (rec.get("etype") or "").lower() else "kickoff"
         out.append({"firstName": rec["first"], "lastName": rec["last"], "phone": rec["phone"],
-                    "email": rec["email"], "source": rec["source"] or "Imported", "expire": rec["expire"]})
+                    "email": rec["email"], "source": rec["source"] or "Imported",
+                    "expire": rec["expire"], "type": lt})
     return out
 
 def insert_leads(s, items):
@@ -481,7 +499,7 @@ def insert_leads(s, items):
     return added, skipped
 
 @app.post("/api/import-file")
-async def import_file(file: UploadFile = File(...), s: Session = Depends(db), user=Depends(require_user)):
+async def import_file(file: UploadFile = File(...), force_type: str = Form(""), s: Session = Depends(db), user=Depends(require_user)):
     fname = (file.filename or "").lower()
     content = await file.read()
     leads = []
@@ -508,8 +526,15 @@ async def import_file(file: UploadFile = File(...), s: Session = Depends(db), us
         raise
     except Exception:
         raise HTTPException(422, "Could not read that file. Try CSV, or paste the text instead.")
+    ft = (force_type or "").strip().lower()
+    if ft in ("kickoff", "sga"):
+        for d in leads:
+            d["type"] = ft
+            d["source"] = "SGA report" if ft == "sga" else d.get("source") or "Kickoff report"
+    kicks = sum(1 for d in leads if (d.get("type") or "kickoff") == "kickoff")
+    sgas = sum(1 for d in leads if (d.get("type") or "kickoff") == "sga")
     added, skipped = insert_leads(s, leads)
-    return {"added": added, "skipped": skipped, "parsed": len(leads)}
+    return {"added": added, "skipped": skipped, "parsed": len(leads), "kickoffs": kicks, "sgas": sgas}
 
 # ---------- public intake (no key required) ----------
 @app.post("/api/intake", status_code=201)
