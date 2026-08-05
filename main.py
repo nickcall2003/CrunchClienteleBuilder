@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from database import Base, engine, SessionLocal
 from pages import INDEX_HTML, INTAKE_HTML
 
-APP_VERSION = "Aug4-6"
+APP_VERSION = "Aug4-7"
 import models
 
 Base.metadata.create_all(bind=engine)
@@ -517,10 +517,13 @@ def parse_report_text(txt):
         if not first and email: first = email
         dates = reDate.findall(line); expire = dates[1] if len(dates) >= 2 else ""
         pm = rePend.search(line); pend = pm.group(1) if pm else ""
+        if reActive.search(line):
+            skipped_active += 1
+            continue  # already has an active recurring service -> skip
         out.append({"firstName": first, "lastName": last, "phone": phone, "email": email,
                     "pending": pend, "expire": expire, "type": ltype,
                     "source": "SGA report" if ltype == "sga" else "Kickoff report"})
-    return out
+    return out, skipped_active
 
 def parse_rows(rows):
     if not rows: return []
@@ -533,6 +536,7 @@ def parse_rows(rows):
         if "email" in s: return "email"
         if _re.search(r"source|origin", s): return "source"
         if _re.search(r"event|appointment type|appt type|^type$|kind", s): return "etype"
+        if _re.search(r"recurring|active service|current service|agreement|has pt|active pt", s): return "recurring"
         if "expir" in s: return "expire"
         return None
     header = [maph(x) for x in rows[0]]
@@ -540,8 +544,9 @@ def parse_rows(rows):
     data = rows[1:] if has else rows
     mapping = header if has else ["first", "last", "phone", "email"]
     out = []
+    skipped_active = 0
     for r in data:
-        rec = {"first": "", "last": "", "phone": "", "email": "", "source": "Imported", "expire": "", "etype": ""}
+        rec = {"first": "", "last": "", "phone": "", "email": "", "source": "Imported", "expire": "", "etype": "", "recurring": ""}
         for i, val in enumerate(r):
             f = mapping[i] if i < len(mapping) else None
             if not f: continue
@@ -556,11 +561,15 @@ def parse_rows(rows):
                 rec[f] = v
         if not rec["first"] and not rec["email"] and not rec["phone"]:
             continue
+        rv = (rec.get("recurring") or "").strip().lower()
+        if rv and rv not in ("no", "none", "0", "n", "false", "inactive", "na", "n/a", "-"):
+            skipped_active += 1
+            continue  # already has an active recurring service -> skip
         lt = "sga" if "sga" in (rec.get("etype") or "").lower() else "kickoff"
         out.append({"firstName": rec["first"], "lastName": rec["last"], "phone": rec["phone"],
                     "email": rec["email"], "source": rec["source"] or "Imported",
                     "expire": rec["expire"], "type": lt})
-    return out
+    return out, skipped_active
 
 def insert_leads(s, items):
     existing = s.query(models.Lead).all()
@@ -595,18 +604,19 @@ async def import_file(file: UploadFile = File(...), force_type: str = Form(""), 
             with pdfplumber.open(_io.BytesIO(content)) as pdf:
                 for pg in pdf.pages:
                     text += (pg.extract_text() or "") + "\n"
-            leads = parse_report_text(text)
+            leads, skipped_active = parse_report_text(text)
         elif fname.endswith(".csv"):
             import csv
             rows = list(csv.reader(_io.StringIO(content.decode("utf-8", "ignore"))))
-            leads = parse_rows(rows)
+            leads, skipped_active = parse_rows(rows)
         elif fname.endswith(".xlsx") or fname.endswith(".xls"):
             import openpyxl
             wb = openpyxl.load_workbook(_io.BytesIO(content), read_only=True, data_only=True)
             rows = [list(r) for r in wb.active.iter_rows(values_only=True)]
-            leads = parse_rows(rows)
+            leads, skipped_active = parse_rows(rows)
         else:
             raise HTTPException(400, "Unsupported file type. Use PDF, CSV, or Excel.")
+        skipped_active = locals().get("skipped_active", 0)
     except HTTPException:
         raise
     except Exception:
@@ -619,7 +629,7 @@ async def import_file(file: UploadFile = File(...), force_type: str = Form(""), 
     kicks = sum(1 for d in leads if (d.get("type") or "kickoff") == "kickoff")
     sgas = sum(1 for d in leads if (d.get("type") or "kickoff") == "sga")
     added, skipped = insert_leads(s, leads)
-    return {"added": added, "skipped": skipped, "parsed": len(leads), "kickoffs": kicks, "sgas": sgas}
+    return {"added": added, "skipped": skipped, "parsed": len(leads), "kickoffs": kicks, "sgas": sgas, "skippedActive": skipped_active}
 
 # ---------- public intake (no key required) ----------
 @app.post("/api/intake", status_code=201)
